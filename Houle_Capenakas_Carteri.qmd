@@ -1,0 +1,1532 @@
+---
+title: "Fitness Analysis"
+authors: "GEORGE HOULE, ENZO CAPENAKAS, DOMENIC CARTERI"
+date: 10/24/2025
+format:
+  html:
+    toc: true
+    toc-location: right
+    toc-title: "Table of Contents"
+    fontsize: 0.9em
+    embed-resources: true
+editor: source
+echo: false
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(lubridate)
+library(corrplot)
+library(broom)
+library(gt)
+library(tseries)
+library(ggplot2)
+library(tsibble)
+library(feasts)
+library(patchwork)
+library(car)
+library(ggfortify)
+library(stringr)
+
+knitr::opts_chunk$set(warning = F, message = F)
+options(scipen = 999)
+```
+
+```{r}
+Running_Data <- RTLedu::strava
+```
+
+```{r functions}
+graph_theme<-function(){
+  ggplot2::theme_classic() +
+  ggplot2::theme(panel.border = element_blank(),
+        panel.grid = element_blank(),
+        axis.line.x = element_line(color = "gray"),
+        axis.line.y = element_line(color = "gray"),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(margin = margin(t = 10)),
+        axis.title = element_text(size = 12),
+        plot.subtitle = element_text(size = 12,hjust=0.5),
+        plot.caption = element_text(face="italic",size = 12,hjust=0),
+        legend.key.width=unit(2,"line"),
+        legend.position = "bottom",
+        legend.box = "vertical",
+        legend.text = element_text(size = 12),
+        plot.title = element_text(hjust=0.5,size = 14))
+}
+```
+
+<!--Data Cleaning-->
+
+```{r, include=FALSE}
+# Time Change to numeric for operations:
+Running_Data <- Running_Data %>%
+  mutate(
+    Time_sec          = as.numeric(Time),
+    Avg.Pace_sec      = as.numeric(Avg.Pace),
+    Best.Pace_sec     = as.numeric(Best.Pace),
+    Best.Lap.Time_sec = as.numeric(Best.Lap.Time),
+    Moving.Time_sec   = as.numeric(Moving.Time),
+    Elapsed.Time_sec  = as.numeric(Elapsed.Time)
+  )
+```
+
+```{r, include=FALSE}
+# Time Change for tables:
+Running_Data <- Running_Data %>%
+  mutate(
+    Time_label = ifelse(
+      Time_sec >= 3600,
+      sprintf("%d:%02d:%02d", Time_sec %/% 3600, (Time_sec %% 3600) %/% 60, Time_sec %% 60),
+      sprintf("%d:%02d", Time_sec %/% 60, Time_sec %% 60)
+    ),
+    Avg.Pace_label = ifelse(
+      Avg.Pace_sec >= 3600,
+      sprintf("%d:%02d:%02d", Avg.Pace_sec %/% 3600, (Avg.Pace_sec %% 3600) %/% 60, Avg.Pace_sec %% 60),
+      sprintf("%d:%02d", Avg.Pace_sec %/% 60, Avg.Pace_sec %% 60)
+    ),
+    Best.Pace_label = ifelse(
+      Best.Pace_sec >= 3600,
+      sprintf("%d:%02d:%02d", Best.Pace_sec %/% 3600, (Best.Pace_sec %% 3600) %/% 60, Best.Pace_sec %% 60),
+      sprintf("%d:%02d", Best.Pace_sec %/% 60, Best.Pace_sec %% 60)
+    ),
+    Best.Lap.Time_label = ifelse(
+      Best.Lap.Time_sec >= 3600,
+      sprintf("%d:%02d:%02d", Best.Lap.Time_sec %/% 3600, (Best.Lap.Time_sec %% 3600) %/% 60, Best.Lap.Time_sec %% 60),
+      sprintf("%d:%02d", Best.Lap.Time_sec %/% 60, Best.Lap.Time_sec %% 60)
+    ),
+    Moving.Time_label = ifelse(
+      Moving.Time_sec >= 3600,
+      sprintf("%d:%02d:%02d", Moving.Time_sec %/% 3600, (Moving.Time_sec %% 3600) %/% 60, Moving.Time_sec %% 60),
+      sprintf("%d:%02d", Moving.Time_sec %/% 60, Moving.Time_sec %% 60)
+    ),
+    Elapsed.Time_label = ifelse(
+      Elapsed.Time_sec >= 3600,
+      sprintf("%d:%02d:%02d", Elapsed.Time_sec %/% 3600, (Elapsed.Time_sec %% 3600) %/% 60, Elapsed.Time_sec %% 60),
+      sprintf("%d:%02d", Elapsed.Time_sec %/% 60, Elapsed.Time_sec %% 60)
+    )
+  )
+```
+
+```{r}
+# Character to Numeric Data Fix:
+columns_to_fix <- c("Total.Ascent", "Total.Descent", "Min.Elevation", "Max.Elevation", "Avg.Resp", "Min.Resp", "Max.Resp", "Avg.HR", "Max.HR", "Aerobic.TE")
+
+Running_Data <- Running_Data %>%
+  dplyr::mutate(
+    across(all_of(columns_to_fix), ~ dplyr::na_if(trimws(.), "--"))
+  ) %>%
+  dplyr::mutate(
+    across(all_of(columns_to_fix), readr::parse_number)
+  )
+```
+
+```{r}
+# Column Cleaning & Character Data Fix:
+Running_Data <- Running_Data %>%
+  dplyr::mutate(
+    across(
+      c(Avg.Run.Cadence, Max.Run.Cadence),
+      ~ as.numeric(ifelse(. %in% c("--", ""), NA, .))))
+```
+
+```{r}
+# Distance to one metric (kms) conversion:
+Running_Data <- Running_Data %>%
+  dplyr::mutate(Distance = ifelse(Distance > 100, Distance / 1000, Distance))
+```
+
+```{r}
+# Removing Columns that we do not need:
+Remove<- c("Avg.Vertical.Ratio", "Avg.Vertical.Oscillation", "Avg.Ground.Contact.Time", "Training.Stress.Score.", "Avg.Power", "Max.Power", "Flow", "Avg..Swolf", "Avg.Stroke.Rate", "Dive.Time", "Surface.Interval", "Favorite", "Decompression")
+
+Running_Data <- Running_Data %>%
+  dplyr::select(-all_of(Remove))
+```
+
+```{r}
+# Proper Paces:
+Running_Data <- Running_Data %>%
+  mutate(
+    Avg.Pace_real_sec = Avg.Pace_sec / 60,     
+    Avg.Pace_real_min = Avg.Pace_real_sec / 60,
+    Avg.Pace_label = sprintf("%d:%02d",
+                             Avg.Pace_real_sec %/% 60,
+                             round(Avg.Pace_real_sec %% 60)),
+    Best.Pace_real_sec = Best.Pace_sec / 60,     
+    Best.Pace_real_min = Best.Pace_real_sec / 60,
+    Best.Pace_label = sprintf("%d:%02d",
+                             Best.Pace_real_sec %/% 60,
+                             round(Best.Pace_real_sec %% 60))
+  )
+```
+
+# Executive Summary
+
+-   We analyzed key performance indicators and fitness measures, Aerobic TE, Average Pace, Distance, Calories Burned, Pace to Heart Rate Ratio, VO2 Max, and Heart Rate, using regression and trend analysis to evaluate endurance, efficiency, and overall improvement.
+
+-   Key Findings:
+
+    -   Aerobic TE showed the strongest relationships with Average Pace and VO2 Max, confirming their importance in assessing aerobic fitness.
+
+    -   Hound demonstrates strong consistency and willingness to exert effort, with higher Average Heart Rate and a recent increase in Aerobic TE, reflecting steady training volume.
+
+    -   Collie shows superior aerobic fitness, maintaining higher Aerobic TE, a better Pace:Heart Rate ratio, and a faster average pace, indicating greater cardiovascular efficiency.
+
+    -   While Hound burns more calories due to longer or more frequent runs, Collie achieves greater aerobic benefits with lower total energy cost, showing higher physiological efficiency.
+
+-   Conclusion:
+
+    -   Collie is the fitter runner, achieving greater aerobic gains with lower physiological cost and stronger upward trends in performance over time.
+
+-   Recommendation: We will train Collie to capitalize on these higher key metrics, linked to genetic and physiological advantages, and refine performance through cadence optimization, heart rate control, and endurance progression. With targeted coaching, Collie has the potential to develop into a highly competitive runner.
+
+# What is Fitness
+
+Fitness is a multifaceted concept that reflects an individual’s capacity to perform physical tasks efficiently and sustainably. Although it is often associated with athletic performance, fitness encompasses several dimensions, including endurance, strength, speed, and recovery. Traditional assessments of fitness, such as VO2 Max and heart rate, provide valuable physiological benchmarks. However, this report takes a quantitative approach, using empirical running data to measure and interpret fitness across multiple performance dimensions.
+
+Despite the importance of fitness, defining and measuring it remains complex. This report will examine fitness through measurable indicators that capture both performance and physiological efficiency.
+
+To illustrate the multidimensional nature of fitness, a correlation heatmap was created to examine relationships among key performance variables. Unlike a Pearson correlation, which measures linear dependence, this analysis uses the Spearman rank correlation, a non-parametric measure that captures rank-based relationships. This approach is robust for fitness data, where variables such as heart rate and pace may not follow perfectly linear patterns.
+
+```{r}
+fitness <- Running_Data %>%
+  dplyr::select("Distance", "Calories", "Avg.HR", "Max.HR", "Aerobic.TE","Avg.Stride.Length", "Min.Temp", "Max.Temp", "Moving.Time_sec", "Elapsed.Time_sec", "Avg.Pace_real_min", "Best.Pace_real_min")
+```
+
+```{r}
+fitness <- fitness %>%
+  dplyr::rename(
+    Moving.Time = Moving.Time_sec,
+    Elapsed.Time = Elapsed.Time_sec,
+    Avg.Pace = Avg.Pace_real_min,
+    Best.Pace = Best.Pace_real_min
+  )
+```
+
+```{r}
+corMat <- stats::cor(fitness, method = "kendall")
+pval <- corrplot::cor.mtest(fitness, conf.level = 0.95)$p
+```
+
+```{r}
+corrplot::corrplot(
+  corr = corMat,
+  method = "number", 
+  order = "original", 
+  type = "upper",
+  tl.pos = 't',
+  diag = TRUE,
+  number.cex = 0.6,
+  tl.col = "black",
+)
+  corrplot(
+    corMat, 
+    type = "lower", 
+    order = "original",
+    p.mat = pval,
+    insig = 'label_sig',
+    sig.level = c(0.001, 0.01, 0.05),
+    tl.pos = 'l',
+    pch.cex = 0.9,
+    pch.col = 'black',
+    diag = TRUE,
+    add = TRUE,
+    tl.col = "black"
+  )
+```
+
+The correlation heatmap above reveals distinct relationships among key performance variables. Strong negative correlations such as average stride length and average pace confirm their inverse association as a runner being faster results in a lower average pace, while the positive relationships such as distance and elapsed time underscores their shared link to endurance. Together, these patterns demonstrate that fitness cannot be captured by a single measure, rather, it arises from the complex interaction between efficiency, effort, and endurance. The next section provides an analysis to provide an understanding of the data in detail.
+
+# Understanding the data
+
+This section explores the structure of the dataset, focusing on all the variables that define each runner’s performance. Understanding where these measures derive from and how they could be leveraged as a tool is crucial for analysis. The first step of analysis being the cleaning and wrangling of the dataset.
+
+Below is a table demonstrating the needs of the data and defining what units we will be working with.
+
+```{r}
+Raw_Data <- RTLedu::strava
+```
+
+```{r}
+Summary <- dplyr::tibble(
+    Variables = c("Distance", "Calories", "Time", "Avg.HR", "Max.HR", "Aerobic.TE", "Avg.Run.Cadence", "Max.Run.Cadence", "Avg.Pace", "Best.Pace", "Total.Ascent", "Total.Descent", "Avg.Stride.Length", "Avg.Vertical.Ratio", "Avg.Vertical.Oscillation", "Avg.Ground.Contact.Time", "Training.Stress.Score.", "Avg.Power", "Max.Power", "Flow", "Avg..Swolf", "Avg.Stroke.Rate", "Dive.Time", "Min.Temp", "Surface.Interval", "Decompression", "Best.Lap.Time", "Number.of.Laps", "Max.Temp", "Avg.Resp", "Min.Resp", "Max.Resp", "Moving.Time", "Elapsed.Time", "Min.Elevation", "Max.Elevation"),
+    
+    Units = c("Km", "Cal", "Secs", "BPM", "BPM", "Score (0-5)", "SPM", "SPM", "Secs", "Secs", "M", "M", "M", "%", "cm", "ms", "Score (0-100)", "W", "W", "Score (unitless)", "Score (unitless)", "Stroke/Min", "Secs", "°C", "Secs", "Secs", "Secs", "Count", "°C", "Breaths/Min", "Breaths/Min", "Breaths/Min", "Secs", "Secs", "M", "M"),
+    
+    Data_Type = c(
+       "Numeric", "Numeric", "Numeric", "Character", "Character", "Character",
+    "Character", "Character", "Numeric", "Numeric", "Character", "Character",
+    "Numeric", "Numeric", "Numeric", "Numeric", "Numeric", "Numeric",
+    "Numeric", "Numeric", "Numeric", "Numeric", "Numeric", "Numeric",
+    "Numeric", "Character", "Numeric", "Numeric", "Numeric", "Numeric",
+    "Character", "Character", "Character", "Numeric", "Numeric", "Character"),
+    
+  Data_Fix = c(
+    "Standardized to kilometres",
+    "No Fix Required",
+    "Convert to numeric seconds and character for rendering",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Converted to min/km format and converted to numeric for operations",
+    "Converted to min/km format and converted to numeric for operations",
+    "Replaced '--' with NA, converted to numeric",
+    "Replaced '--' with NA, converted to numeric",
+    "No Fix Required",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to 0 data",
+    "No Fix Required",
+    "Needs to be removed due to 0 data",
+    "Needs to be removed due to no significance",
+    "Convert to numeric seconds and character for rendering",
+    "No Fix Required",
+    "No Fix Required",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Convert from character to numeric",
+    "Converted to min/km format and converted to numeric for operations",
+    "Converted to min/km format and converted to numeric for operations",
+    "Convert from character to numeric",
+    "Convert from character to numeric"
+  )
+)
+```
+
+```{r}
+# Optional: derive a simple action code from your Data_Fix text
+Summary_display <- Summary %>%
+  mutate(
+    Action = case_when(
+      grepl("^Needs to be removed", Data_Fix) ~ "Remove",
+      grepl("^Convert", Data_Fix)             ~ "Convert",
+      grepl("^Replaced|^Standardized|^Checked|^Validated", Data_Fix) ~ "Clean",
+      grepl("^No Fix Required", Data_Fix)     ~ "OK",
+      TRUE                                    ~ "Note"
+    )
+  )
+
+Summary_display %>%
+  gt() %>%
+  tab_header(
+    title = "Fitness Dataset Overview",
+    subtitle = "Variables, units, data types, and planned fixes"
+  ) %>%
+  cols_label(
+    Variables  = "Variable",
+    Units      = "Unit",
+    Data_Type  = "Data type",
+    Data_Fix   = "Planned fix",
+    Action     = "Action"
+  ) %>%
+  cols_move_to_start(columns = c(Variables, Units, Data_Type)) %>%
+  cols_width(
+    Variables ~ px(220),
+    Units     ~ px(90),
+    Data_Type ~ px(110),
+    Action    ~ px(95),
+    Data_Fix  ~ px(420)
+  ) %>%
+  cols_align(
+    align = "left",   columns = c(Variables, Data_Fix)
+  ) %>%
+  cols_align(
+    align = "center", columns = c(Units, Data_Type, Action)
+  ) %>%
+  text_transform(
+    locations = cells_body(columns = "Units"),
+    fn = function(x) gsub("^([a-zA-Z]+)$", "\\1", x) 
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#FDE2E1"), cell_text(color = "#8B0000", weight = "bold")),
+    locations = cells_body(rows = Action == "Remove", columns = Data_Fix)
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#E5F6FF"), cell_text(color = "#004A75")),
+    locations = cells_body(rows = Action == "Convert", columns = Data_Fix)
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#EAF7EA"), cell_text(color = "#1E6B1E")),
+    locations = cells_body(rows = Action == "Clean", columns = Data_Fix)
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#F4F4F4"), cell_text(color = "#444444")),
+    locations = cells_body(rows = Action == "OK", columns = Data_Fix)
+  ) %>%
+  opt_row_striping() %>%
+  tab_options(
+    table.font.size = px(14),
+    data_row.padding = px(8),
+    heading.title.font.weight = "bold",
+    column_labels.font.weight = "bold"
+  )
+
+```
+
+In any report, justification of data elimination is critical for accuracy, thus being said, some data variables are going to be removed and this is due to either qualities we do not need in this report, or the data having limitations such as being zero or NA throughout the column.
+
+# Data Overview & Data Distributions
+
+In this section, we analyze the data from Hound and Collie to uncover key statistical patterns that shape their fitness profiles. We test for normality, explore data distributions and seasonality. Together, these analyses reveal how consistent, balanced, and interrelated each athlete’s performance measures are.
+
+## Normality Testing \~ Jarque-Bera and KPSS
+
+Here we apply the Jarque-Bera test to assess whether key performance variables follow a normal distribution. This test evaluates how closely each variable’s observed distribution aligns with a theoretical normal curve by examining its skewness and kurtosis. Understanding the degree of normality helps determine the appropriate statistical methods to use in later analyses and reveals whether the athletes’ performance data are symmetrically distributed or influenced by outliers and variability.
+
+```{r}
+testv <- c("Distance", "Calories", "Avg.HR", "Max.HR", "Aerobic.TE", "Avg.Run.Cadence", "Max.Run.Cadence", "Avg.Pace_real_min", "Best.Pace_real_min", "Total.Ascent", "Total.Descent", "Avg.Stride.Length","Min.Temp", "Best.Lap.Time_sec", "Max.Temp","Moving.Time_sec", "Elapsed.Time_sec", "Min.Elevation", "Max.Elevation")
+```
+
+```{r, include=FALSE}
+Stats1 <- Running_Data %>% 
+  dplyr::select(any_of(testv)) %>%
+  tidyr::pivot_longer(everything(),
+               names_to = "variable",
+               values_to = "value")
+```
+
+```{r}
+JB <- Stats1 %>%
+  group_by(variable) %>%
+  dplyr::do(broom::tidy(tseries::jarque.bera.test(na.omit(.$value))))
+```
+
+```{r, include=FALSE}
+Level <- Stats1 %>%
+  group_by(variable) %>%
+  dplyr::do(broom::tidy(tseries::kpss.test(na.omit(.$value, null = "Level"))))
+```
+
+```{r, include=FALSE}
+Trend <- Stats1 %>%
+  group_by(variable) %>%
+  dplyr::do(broom::tidy(tseries::kpss.test(na.omit(.$value, null = "Trend"))))
+```
+
+```{r}
+statstable <- dplyr::tibble(
+    Variable = JB$variable,
+    JB_P.Value = JB$p.value,
+    KPSS_Level_P.Value = Level$p.value,
+    KPSS_Trend_P.Value = Trend$p.value)
+```
+
+```{r}
+statstable_simple <- statstable %>%
+  mutate(across(-Variable, ~ round(., 5)))   
+
+statstable_simple %>%
+  gt() %>%
+  cols_label(
+    Variable = md("**Variable**"),
+    JB_P.Value = md("**JB p-value**"),
+    KPSS_Level_P.Value = md("**KPSS Level p-value**"),
+    KPSS_Trend_P.Value = md("**KPSS Trend p-value**")
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.weight = "bold",
+    data_row.padding = px(4),
+    table.width = pct(100)
+  )
+
+```
+
+The results from the Jarque-Bera (JB) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests reveal clear statistical evidence that the underlying variables in this dataset deviate from normality and exhibit signs of non-stationarity.
+
+-   Normality (Jarque-Bera): The JB p-values for nearly all variables fall well below 0.05, meaning the null hypothesis of normality is rejected. This indicates that the distributions of key performance metrics such as Distance, Calories, Heart Rate, and Pace are non-normal, reflecting skewed or heavy-tailed patterns. These results are consistent with the visual findings in the next section showing bimodal and asymmetric distributions, supporting the notion that the dataset combines two runners, Hound and Collie, with differing physiological traits and training intensities. Only Min.Elevation (p = 0.23654) shows evidence of approximate normality, suggesting more stable altitude baselines across sessions.
+
+-   Stationarity (KPSS): The KPSS test, which assumes the data is stationary under the null, produces p-values below 0.05 for most variables, leading to rejection of stationarity. This indicates that many running metrics display systematic trends or shifts over time, likely reflecting training progression, fatigue, or environmental variability. However, Distance, Total Ascent, and Total Descent have slightly higher KPSS p-values, implying weak evidence of level or trend stationarity, possibly due to consistent route choices or repeated training loops.
+
+Collectively, these results highlight that the runners’ data are non-normal, partially non-stationary, and reflect distinct behavioral regimens rather than a single, consistent process. The mixture of two runners’ performances, one more variable and another more consistent, creates structural breaks in the series, explaining why most tests reject both normality and perfect stationarity. This reinforces that the data captures dynamic, real-world fitness behavior rather than a controlled, idealized process, which is expected in human performance studies.
+
+## Distributions
+
+Understanding the distribution of key performance variables is vital for identifying the underlying dynamics of fitness and performance. This section explores how each metric behaves across all recorded runs, revealing the spread, concentration, and variability of performance data. By visualizing the frequency of observed values for each metric, we can detect patterns such as consistency, outliers, and skewness that highlight differences in effort, endurance, and training load. These distributions form the foundation for later comparisons between individuals and the interpretation of what constitutes “fitness” within the dataset.
+
+```{r, include=FALSE}
+dist <- Running_Data %>%
+  dplyr::select(Distance, Calories, Avg.HR, Max.HR, Aerobic.TE,
+                Avg.Run.Cadence, Max.Run.Cadence, Avg.Pace_real_min,
+                Best.Pace_real_min, Total.Ascent, Total.Descent,
+                Avg.Stride.Length, Max.Temp, Min.Temp,
+                Min.Elevation, Max.Elevation) %>%
+  dplyr::filter(if_all(everything(), ~ !is.na(.))) %>%
+  dplyr::rename(
+    Best.Pace = Best.Pace_real_min,
+    Avg.Pace = Avg.Pace_real_min
+  )
+
+dist_long <- dist %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::group_by(Metric, Value) %>%
+  dplyr::mutate(Count = dplyr::n()) %>%  
+  dplyr::ungroup()
+
+distn <- dist_long %>% ggplot2::ggplot(ggplot2::aes(x = Value, y = Count)) +
+  ggplot2::geom_line(ggplot2::aes(color = Metric), size = 0.28, alpha = 1) +
+  ggplot2::facet_wrap(~ Metric, scales = "free", ncol = 4) +
+  ggplot2::labs(
+    title = "Distributions of Variables",
+    x = "",
+    y = ""
+  ) +
+  ggplot2::theme(
+    legend.position = "none",
+    strip.text = ggplot2::element_text(face = "bold")
+  )
+```
+
+```{r}
+distn
+```
+
+-   Aerobic Training Effect (Aerobic.TE): The distribution trends upward with a small secondary rise near the maximum, suggesting that both runners achieve moderate-to-high aerobic training effects. One likely maintains steady, moderate sessions, while the other consistently reaches higher exertion levels. 
+
+-   Heart Rate Metrics (Avg.HR, Max.HR): Both heart rate plots show multiple peaks, reflecting differing cardiovascular responses between both runners. One tends to operate within a mid-range heart rate, while the other frequently pushes toward higher exertion, indicating a stronger tolerance for intensity or a higher maximum capacity. 
+
+-   Pace Metrics (Avg.Pace, Best.Pace): The pace variables are distinctly clustered, with one concentration of faster times and another slower range, confirming the presence of two performance profiles, one runner is faster and more consistent, while the other varies more between runs. 
+
+-   Cadence and Stride Length (Avg.Run.Cadence, Max.Run.Cadence, Avg.Stride.Length): Cadence and stride metrics show moderate spread, with one runner maintaining a tighter, more efficient rhythm and stride, while the other displays broader variability.
+
+-   Calories and Distance: These variables are right-skewed, indicating that one runner consistently completes shorter, lower-calorie runs, while the other performs longer, more energy-demanding sessions. The uneven distribution supports the presence of differing training intensities. 
+
+-   Elevation Metrics (Min.Elevation, Max.Elevation, Total.Ascent, Total.Descent): Multi-peaked elevation patterns suggest training across varied terrain types. One runner favors routes with gradual elevation changes, while the other frequently engages in more significant climbs and descents, contributing to differences in total ascent and descent. 
+
+-   Temperature Metrics (Max.Temp, Min.Temp): Both maximum and minimum temperature distributions show wide variability, implying the runs occurred across multiple seasons or weather conditions. This variation supports the idea that the data were collected independently by two runners over different time periods.
+
+Across all metrics, the non-uniform and often bimodal distributions highlight two distinct running styles. One runner demonstrates steadier endurance and controlled pacing, while the other exhibits higher variability, intensity, and environmental adaptability. Collectively, these patterns confirm that the dataset merges the unique physiological and behavioral profiles of Hound and Collie, rather than one consistent individual.
+
+## Seasonality
+
+Understanding seasonality allows us to separate cyclical fluctuations from long-term trends and random variations. By decomposing key running metrics Average Pace, Distance, Average Heart Rate, and Average Run Cadence we can assess whether the runners’ performances follow consistent temporal cycles or reflect structural changes in training behavior. 
+
+In the context of this study, seasonality represents recurring changes in fitness metrics that may arise from external factors such as weather, calendar cycles, or training patterns, while trend reflects the longer-term direction of fitness improvement or decline. The residuals capture random deviations not explained by systematic variation. 
+
+Testing earlier for stationarity and normality confirmed that our data are non-stationary and non-normal, meaning mean and variance change over time, consistent with how fitness evolves rather than remaining static. The decompositions below visualize these evolving relationships, where the linear trend and seasonal cycles provide deeper insight into training adaptation and behavioral rhythms across Hound and Collie.
+
+```{r}
+Seasonality <- Running_Data %>%
+  group_by(Activity.Type, Date) %>%
+  dplyr::mutate(Activity.Type = "Activity") %>% 
+  summarise(
+    Avg.Pace_real_min = mean(Avg.Pace_real_min, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+Seas <- Seasonality %>%
+  dplyr::filter(Date >= "2021-01-02") %>% 
+  tsibble::as_tsibble(key = Activity.Type, index = Date) %>%
+  tsibble::group_by_key() %>%
+  tsibble::index_by(freq = ~ yearmonth(.)) %>%
+  dplyr::summarise(
+    Avg.Pace = mean(Avg.Pace_real_min, na.rm = TRUE),
+    .groups = "keep"
+  ) %>%
+  dplyr::mutate(change = Avg.Pace - dplyr::lag(Avg.Pace)) %>%
+  stats::na.omit()
+
+stl.ng3 <- Seas %>% 
+  dplyr::filter(Activity.Type == "Activity") %>%
+  fabletools::model(feasts::STL(formula = Avg.Pace ~ season(window = 13)))
+
+stl.ng3 %>% 
+  fabletools::components() %>% 
+  autoplot() +
+  labs(title = "STL Decomposition of Average Pace",
+       x = "Date")
+```
+
+-   The long-term trend line reveals gradual improvement in pace over time, followed by a flattening period, likely reflecting performance stabilization. 
+
+-   Seasonal variation shows periodic slowdowns during colder months, consistent with environmental or motivational cycles.
+
+-   Residuals remain relatively small, suggesting limited unexplained volatility beyond normal fluctuations. 
+
+-   The non-stationary nature of the pace data as confirmed by KPSS test aligns with this trend behavior, as average pace adapts over time.
+
+```{r}
+Seasonality2 <- Running_Data %>%
+  group_by(Activity.Type, Date) %>%
+  dplyr::mutate(Activity.Type = "Activity") %>% 
+  summarise(
+    Distance = mean(Distance, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+Seas2 <- Seasonality2 %>%
+  dplyr::filter(Date >= "2021-01-02") %>% 
+  tsibble::as_tsibble(key = Activity.Type, index = Date) %>%
+  tsibble::group_by_key() %>%
+  tsibble::index_by(freq = ~ yearmonth(.)) %>%
+  dplyr::summarise(
+    Distance = mean(Distance, na.rm = TRUE),
+    .groups = "keep"
+  ) %>%
+  dplyr::mutate(change = Distance - dplyr::lag(Distance)) %>%
+  stats::na.omit()
+
+stl.ng4 <- Seas2 %>% 
+  dplyr::filter(Activity.Type == "Activity") %>%
+  fabletools::model(feasts::STL(formula = Distance ~ season(window = 13)))
+
+stl.ng4 %>% 
+  fabletools::components() %>% 
+  autoplot() +
+  labs(title = "STL Decomposition of Distance",
+       x = "Date")
+```
+
+-   The trend component shows a mild decline followed by recovery, implying an initial reduction in training volume before renewed consistency. 
+
+-   Seasonal cycles correspond to training peaks and breaks, possibly linked to weather or academic schedule patterns. 
+
+-   The residuals show random noise without clear structure, indicating good model fit. 
+
+-   Non-stationarity remains evident, distance does not revert to a stable mean but shifts according to each runner’s evolving training load. 
+
+-   The lack of normality is visible through asymmetric peaks, reflecting that one runner likely performs more long runs, driving right-skewness.
+
+```{r}
+Seasonality3 <- Running_Data %>%
+  group_by(Activity.Type, Date) %>%
+  dplyr::mutate(Activity.Type = "Activity") %>% 
+  summarise(
+    Avg.HR = mean(Avg.HR, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+Seas3 <- Seasonality3 %>%
+  dplyr::filter(Date >= "2021-01-02") %>% 
+  tsibble::as_tsibble(key = Activity.Type, index = Date) %>%
+  tsibble::group_by_key() %>%
+  tsibble::index_by(freq = ~ yearmonth(.)) %>%
+  dplyr::summarise(
+    Avg.HR = mean(Avg.HR, na.rm = TRUE),
+    .groups = "keep"
+  ) %>%
+  dplyr::mutate(change = Avg.HR - dplyr::lag(Avg.HR)) %>%
+  stats::na.omit()
+
+stl.ng4 <- Seas3 %>% 
+  dplyr::filter(Activity.Type == "Activity") %>%
+  fabletools::model(feasts::STL(formula = Avg.HR ~ season(window = 13)))
+
+stl.ng4 %>% 
+  fabletools::components() %>% 
+  autoplot() +
+  labs(title = "STL Decomposition of Average Heart Rate",
+       x = "Date")
+```
+
+-   The trend suggests a gradual decline in average heart rate over time, implying improved cardiovascular efficiency or better conditioning. 
+
+-   Seasonal oscillations persist, potentially due to temperature or recovery differences between seasons. 
+
+-   Residuals are moderate, meaning short-term factors like fatigue contribute to variability but do not dominate the signal. 
+
+-   The combination of non-normality with pace and cadence is consistent with physiological coupling between speed and heart rate response. 
+
+-   Stationarity tests reaffirm that heart rate adjusts dynamically rather than stabilizing, which is natural in human performance data.
+
+```{r}
+Seasonality4 <- Running_Data %>%
+  group_by(Activity.Type, Date) %>%
+  dplyr::mutate(Activity.Type = "Activity") %>% 
+  summarise(
+    Avg.Run.Cadence = mean(Avg.Run.Cadence, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+Seas4 <- Seasonality4 %>%
+  dplyr::filter(Date >= "2021-01-02") %>% 
+  tsibble::as_tsibble(key = Activity.Type, index = Date) %>%
+  tsibble::group_by_key() %>%
+  tsibble::index_by(freq = ~ yearmonth(.)) %>%
+  dplyr::summarise(
+    Avg.Run.Cadence = mean(Avg.Run.Cadence, na.rm = TRUE),
+    .groups = "keep"
+  ) %>%
+  dplyr::mutate(change = Avg.Run.Cadence - dplyr::lag(Avg.Run.Cadence)) %>%
+  stats::na.omit()
+
+stl.ng5 <- Seas4 %>% 
+  dplyr::filter(Activity.Type == "Activity") %>%
+  fabletools::model(feasts::STL(formula = Avg.Run.Cadence ~ season(window = 13)))
+
+stl.ng5 %>% 
+  fabletools::components() %>% 
+  autoplot() +
+  labs(title = "STL Decomposition of Average Run Cadence",
+       x = "Date")
+```
+
+-   The trend shows a steady increase in cadence after a brief dip, indicating gradual refinement in running technique and rhythm over time. 
+
+-   Seasonality is visible but moderate, implying cadence is more stable than other metrics, often tied to personal form rather than external conditions. 
+
+-   Residuals exhibit more short-term volatility, perhaps reflecting differences between Hound and Collie’s stride frequencies. 
+
+-   The non-normal distribution of cadence values further aligns with bimodal behavior seen earlier, confirming two runners with distinct movement patterns.
+
+Across all four metrics, the decompositions confirm that fitness behavior is dynamic, cyclical, and non-stationary. Each runner demonstrates identifiable seasonal rhythms tied to environmental and behavioral cycles, while the trend components reveal tangible long-term performance changes. The residuals remain small overall, suggesting the STL decomposition effectively isolates meaningful structure from random variation. Together, these insights reinforce that running performance is not purely random but shaped by an evolving combination of physiology, environment, and consistency over time. Fitness must be defined in both absolute and relative terms, how fit each runner is at a given point, and how much they have improved throughout their training history.
+
+# Interpretation of Fitness
+
+In the context of this report, fitness is not just a single number or outcome but is a multidimensional construct that captures endurance, efficiency, and adaptability over time.\
+
+In quantitative terms, fitness is reflected through measurable outputs such as pace, heart rate response, energy expenditure, and consistency, all of which indicate how effectively the body translates effort into performance.
+
+**We formally define fitness as:**
+
+-   The capacity to sustain and enhance physical performance through improved cardiovascular efficiency, muscular endurance, and energy utilization. Fitness reflects the body’s ability to perform repeated amounts of exertion with reduced physiological cost, maintaining or improving metrics such as pace, heart rate, distance, and elevation gain over time. Representing an individual’s adaptability to increasing training demands and environmental challenges while exhibiting lower heart rate responses, faster recovery, and consistent performance progression.\
+
+**Performance Metrics:**
+
+-   Distance (km): Measures endurance capacity, higher consistent distances imply better aerobic fitness. 
+
+-   Avg.Pace_real_min (min/km): Reflects efficiency, faster average pace indicates higher cardiovascular and muscular performance. 
+
+-   Best.Pace_real_min: Captures peak performance potential during shorter bursts. 
+
+-   Elapsed.Time_sec / Moving.Time_sec: Measure duration and rest efficiency (difference shows how efficiently time is spent running). \
+
+**Cardiovascular Metrics:**
+
+-   Avg.HR / Max.HR (bpm): Gauge cardiovascular load and capacity, lower average HR for the same pace indicates improved conditioning. 
+
+-   Aerobic.TE (Training Effect): Quantifies the physiological impact of a workout on aerobic capacity. 
+
+-   Calories: Represents total energy expenditure, trends with fitness intensity and duration. 
+
+-   VO2 Max: Measure of maximal oxygen uptake, an indicator of cardiovascular endurance derived from the relationship between pace and heart rate.\
+
+**Form and Efficiency Metrics:**
+
+-   Avg.Run.Cadence / Max.Run.Cadence (steps per min): Indicate running rhythm and efficiency, higher stable cadence suggests optimized stride economy. 
+
+-   Avg.Stride.Length (m): Longer, consistent stride length typically correlates with improved power output and form efficiency. 
+
+-   Elevation Gain (Total.Ascent/Descent): Reflects terrain complexity and muscular endurance. 
+
+-   Pace-to-Heart Rate Ratio: Measures efficiency as faster pace at lower HR reflects improved aerobic output.
+
+-   Efficiency Ratio: Distance divided by Calories burned, higher ratio implies more efficient energy utilization.
+
+**Environmental and Recovery Variables:**
+
+-   Max.Temp / Min.Temp: Capture weather conditions influencing performance variability. 
+
+# Evaluation of Individual performance
+
+In this section, we look at what are, in our opinions, the most important performance indicators for each runner, create visuals to see how each runner performs under each indicator, and run linear regressions to determine how each indicator relates to each other.
+
+```{r}
+#Add column: Change in elevtion
+Running_Data <- Running_Data %>% 
+  mutate(elevation_change = Max.Elevation - Min.Elevation)
+```
+
+```{r}
+#Add column: VO2 Max
+Running_Data <- Running_Data %>% 
+  mutate(VO2_Max= 15.3*(Max.HR/Avg.HR))
+```
+
+```{r}
+#Add column: Pace to heart rate ratio
+Running_Data <- Running_Data %>% 
+  mutate(Pace_HR_Ratio= (1000/Avg.Pace_real_min)/Avg.HR)
+```
+
+```{r}
+# To only include data where both runners are acive
+start_date <- Running_Data %>%
+  group_by(Runner) %>%
+  summarize(first_date = min(Date, na.rm = TRUE)) %>%
+  ungroup() %>%
+  summarize(latest_start = max(first_date)) %>%
+  pull(latest_start)
+```
+
+```{r}
+#The filter for above
+Running_Data <- Running_Data %>%
+  filter(Date >= start_date)
+```
+
+```{r}
+#Calories burned over time
+ggplot(data=Running_Data)+
+  geom_line(mapping=aes(x=Date, y=Calories, colour = Runner), size=1)+
+  facet_wrap(~Runner)+
+  scale_color_manual(values = c("blue", "red"))+
+  theme_light()+
+  labs(
+    title = "Calories Burned Over Time",
+    subtitle = "Comparison by Runner",
+    x = "Date",
+    y = "Calories"
+  )
+
+```
+
+Considering the established association between caloric expenditure and Aerobic Training Effect (TE), this analysis compares the differences in calories burned between runners. Examining these variations provides a deeper understanding of how energy output may influence the observed significance of average Aerobic TE across activities.
+
+```{r}
+#GT Table: Avg number of calories burned per activity
+Avg_Cals <- Running_Data %>%
+  group_by(Runner) %>%
+  summarise(
+    Mean_Calories= mean(Calories)
+  )
+Avg_Cals %>%
+  gt() %>%
+  cols_label(
+    Runner = md("**Runner**"),
+    Mean_Calories = md("**Mean Calories**")
+  ) %>%
+  fmt_number(
+    columns = Mean_Calories,
+    decimals = 2
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.weight = "bold",
+    data_row.padding = px(4),
+    table.width = pct(100)
+  )
+```
+
+When comparing average caloric expenditure between runners, Hound demonstrates a higher mean value relative to Collie. This suggests that Hound’s training sessions generally involve greater total energy output, reflecting longer durations. However, higher caloric expenditure does not necessarily indicate superior fitness, rather, it may correspond to differences genetic fitness.
+
+In contrast, Collie’s lower mean caloric expenditure paired with previously observed improvements in Aerobic TE and pace efficiency implies greater physiological efficiency achieving similar or improved aerobic benefits while expending less energy. This supports the interpretation that Collie’s conditioning emphasizes sustainable endurance and cardiovascular efficiency, whereas Hound’s performance pattern indicates higher absolute workload but potentially less efficient energy utilization.
+
+```{r}
+#Add new column: Cummulative Calories
+Running_Data <- Running_Data %>% 
+  group_by(Runner) %>% 
+  mutate(cumm_cal = rev(cumsum(rev(Calories)))) %>% 
+  select(1:which(names(Running_Data) == "Calories"),cumm_cal,everything())
+```
+
+```{r}
+#Total Calories over time
+library(scales)
+ggplot(data=Running_Data)+
+  geom_line(mapping=aes(x=Date, y=cumm_cal, color=Runner), size=1)+
+  scale_color_manual(values = c("blue", "red"))+
+  scale_y_continuous(labels = label_comma())+
+  theme_light()+
+  labs(title = "Cummulative Calories Burned over time",
+       y = "Cummulative Calories",
+       x = "Date")
+```
+
+Further analysis examines how caloric expenditure evolves over time using a cumulative model. The results indicate that Hound’s cumulative calorie burn increases more steeply, reflecting higher overall training volume and consistency in energy expenditure across sessions. This trend suggests that Hound engages in more frequent or longer duration runs, leading to a continuous accumulation of caloric output.
+
+In contrast, Collie’s cumulative curve rises at a slower rate, characterized by shorter or less frequent training periods. However, when interpreted alongside Collie’s higher Aerobic TE and improved pace efficiency, this pattern implies that Collie achieves comparable aerobic adaptations with lower total energy cost. This reinforces the notion that Collie’s training is becoming more efficient and performance oriented, while Hound’s approach emphasizes volume and workload intensity over time.
+
+```{r}
+#Avg pase based on elapsed time
+ggplot(data=Running_Data)+
+  geom_line(mapping = aes(x=Elapsed.Time, y=Avg.Pace, color=Runner), size = 1)+
+  facet_wrap(~Runner)+
+  theme_light()+
+  scale_color_manual(values = c("blue", "red"))+
+  labs(title= "Average Pace vs Elapsed Time")
+```
+
+Elapsed time was used instead of running time to account for pauses or breaks during activity, which can influence the Aerobic TE. This consideration is particularly relevant for Hound, whose longer elapsed times suggest more frequent or extended rest periods between bouts of effort.
+
+```{r}
+#Aerobic TE over each excersise
+ggplot(data=Running_Data)+
+  geom_point(mapping=aes(x=Date, y=Aerobic.TE, color=Runner), size=1)+
+  facet_wrap(~Runner)+
+  theme_light()+
+  scale_color_manual(values = c("blue", "red"))+
+  labs(title= "Aerobic Training Effect For Each Excersise")
+
+```
+
+The Aerobic TE scatter plot shows that Collie consistently achieves higher TE values between 4 and 5 across time, indicating sustained aerobic improvement and effective training intensity. Hound, while active over a similar period, exhibits more fluctuation and lower average TE values, suggesting less consistent aerobic adaptation and variable training effort.
+
+```{r}
+#GT Table: Avg Aerobic TE score per activity (most important)
+Avg_Aerobic <- Running_Data %>%
+  group_by(Runner) %>%
+  summarise(
+    Mean_Aerobic = mean(as.numeric(Aerobic.TE), na.rm = TRUE)
+  )
+
+Avg_Aerobic %>%
+  gt() %>%
+  cols_label(
+    Runner = md("**Runner**"),
+    Mean_Aerobic = md("**Mean Aerobic**")
+  ) %>%
+  fmt_number(
+    columns = Mean_Aerobic,
+    decimals = 2
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.weight = "bold",
+    data_row.padding = px(4),
+    table.width = pct(100)
+  )
+
+```
+
+On average, Collie achieved a higher Aerobic Training Effect compared to Hound, indicating that Collie’s workouts consistently produced greater aerobic benefit and training efficiency. This suggests a stronger overall cardiovascular adaptation and more effective conditioning over time.
+
+```{r}
+#Avg VO2 Max and Pace to heart rate ratio
+VO2 <- Running_Data %>% 
+  group_by(Runner) %>% 
+  summarise(
+    Mean_VO2_Max = mean(VO2_Max, na.rm = TRUE),
+    Mean_Pace_HR_Ratio = mean(Pace_HR_Ratio, na.rm = TRUE)
+  )
+
+VO2 %>%
+  gt() %>%
+  cols_label(
+    Runner = md("**Runner**"),
+    Mean_VO2_Max = md("**Mean VO2 Max**"),
+    Mean_Pace_HR_Ratio = md("**Mean Pace:HR Ratio**")
+  ) %>%
+  fmt_number(
+    columns = c(Mean_VO2_Max, Mean_Pace_HR_Ratio),
+    decimals = 2
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.weight = "bold",
+    data_row.padding = px(4),
+    table.width = pct(100)
+  )
+```
+
+While Hound shows a slightly higher mean VO2 Max than Collie, Collie demonstrates a superior Pace:HR ratio, indicating greater efficiency maintaining faster paces at lower heart rates. This suggests that despite similar aerobic capacity, Collie converts cardiovascular output into performance more effectively.
+
+# Regressions with the dependant var is Aerobic.TE
+
+```{r}
+#GT Table: How Aerobic TE relates to calories burned, distance, and avg pace
+RegArTE <- lm(data=Running_Data, Aerobic.TE ~ Calories + Distance + Avg.Pace + VO2_Max )
+
+broom::tidy(RegArTE) %>%
+  gt() %>%
+  cols_label(
+    term = md("**Term**"),
+    estimate = md("**Estimate**"),
+    std.error = md("**Std. Error**"),
+    statistic = md("**t-Statistic**"),
+    p.value = md("**p-Value**")
+  ) %>%
+  fmt_number(
+    columns = c(estimate, std.error, statistic, p.value),
+    decimals = 4
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.weight = "bold",
+    data_row.padding = px(4),
+    table.width = pct(100)
+  )
+
+#Aerobic TE ties well with Avg Pace and VO2 max (P-value<0.02)
+```
+
+The regression tables presented above summarize the relationships between key performance variables such as distance, calories, pace, and aerobic training effect. These results provide the statistical foundation for interpreting runner performance and will be referenced in the analysis section that follows.
+
+# Determination of who is the Fittest
+
+To determine overall fitness, we analyzed key performance indicators Calories, Average Pace, VO2 Max, and Aerobic Training Effect and assessed how they relate through regression analysis. Aerobic TE, a 0-5 scale of aerobic benefit, proved most strongly associated with average pace and VO2 Max, showing that training intensity and aerobic capacity are key drivers of improvement. Calories burned showed only marginal significance, suggesting that efficiency, not volume, matters most.
+
+The calorie graphs show that Hound burns more calories overall and has a steeper cumulative trend, reflecting higher training volume and consistency. However, Collie achieves greater aerobic benefit with lower total energy output, demonstrating more efficient energy use and recovery.
+
+Collie’s mean Aerobic TE of 4.25 surpasses Hound’s 3.62, indicating stronger cardiovascular response per workout. Similarly, Collie’s pace-to-heart-rate ratio shows faster paces at lower exertion of aerobic efficiency. While Hound’s VO2 Max is slightly higher, Collie’s better pace efficiency indicates better conversion of aerobic capacity into performance.
+
+The pace versus elapsed time plots confirm this, Collie maintains quicker paces for shorter durations, while Hound’s longer sessions produce slower, more variable pacing.
+
+Overall, Hound trains with greater total workload, but Collie demonstrates higher aerobic efficiency and conditioning relative to effort. When fitness is defined by achieving greater aerobic gains with less physiological cost, Collie is the fitter runner.
+
+# Analysis of Improved Fitness Criteria
+
+## Performance Over Time
+
+We can analyze both runners' performances in the long run and short run to get a better idea of their improvement over time. This allows us to get an idea of their rate of progression as well as their more recent commitment to running.
+
+```{r}
+# data set for comparison between both individuals
+earliest_date <- Running_Data %>%
+  dplyr::filter(Runner == "Collie") %>%
+  pull(Date) %>%
+  min(.)
+
+comp_data <- Running_Data %>%
+  dplyr::filter(Date >= earliest_date) %>%
+  dplyr::select(Runner, Date, Distance, Avg.HR, Aerobic.TE, Avg.Pace_real_min, Calories, Avg.Run.Cadence)
+
+year_ago <- comp_data %>%
+  pull(Date) %>%
+  max(.)
+
+one_year_data <- comp_data %>%
+  dplyr::filter(Date >= (year_ago-365))
+```
+
+### Distance:
+
+```{r}
+# distance trend
+dist_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Distance, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Distance per Session Over Time", y = "Distance (km)", x = "") +
+  theme_light()
+```
+
+```{r}
+# distance trend one year
+dist_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Distance, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Distance per Session Over Time (Past Year)", y = "Distance (km)", x = "") +
+  theme_light()
+```
+
+```{r}
+dist_graph1 / dist_graph2
+```
+
+We can see in the distance graphs that both Collie and Hound run very similar distances and even increase their distances at around the same time.
+
+### Average Pace:
+
+```{r}
+# pace trend
+pace_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.Pace_real_min, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Pace Over Time", y = "Average pace (min/km)", x = "") +
+  theme_light()
+```
+
+```{r}
+# pace trend one year
+pace_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.Pace_real_min, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Pace Over Time (Past Year)", y = "Average pace (min/km)", x = "") +
+  theme_light()
+```
+
+```{r}
+pace_graph1 / pace_graph2
+```
+
+The first thing to point out is that Collie and Hound tend to run similar distances, which means we can compare their average paces without worrying if differences in distance ran might be an issue. We can see from the pace graphs that Collie consistently maintains a better pace than Hound in his runs. We can also see that Collie showed the best pace improvement over the past year, partly due to the increase in pace we saw in the long-term graph, but also likely due to athletic improvement.
+
+### Average Heart Rate:
+
+```{r}
+# heart rate trend
+hr_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.HR, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Avg Heart Rate Over Time", y = "Average Heart Rate (bpm)", x = "") +
+  theme_light()
+```
+
+```{r}
+# heart rate trend one year
+hr_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.HR, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Avg Heart Rate Over Time (Past Year)", y = "Average Heart Rate (bpm)", x = "") +
+  theme_light()
+```
+
+```{r}
+hr_graph1 / hr_graph2
+```
+
+Heart rate is an indicator of exertion or fitness ability. We can see that in the long-run, Collie’s average heart rate steadily declined while Hound’s average heart rate steadily increased. Looking at the average pace and average heart rate graphs together we can see that both Collie’s decreased heart rate and Hound’s increased heart rate match with their respective improvements in pace. This could mean that Collie maintained the same level of exertion while his fitness level improved, therefore leading to a decreased heart rate and better pace in his runs. It could also mean that Hound increased his level exertion during his runs, leading to better pace and an increased heart rate.
+
+### Aerobic TE:
+
+```{r}
+# aerobic te trend
+te_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Aerobic.TE, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Aerobic Training Efficiency Over Time", subtitle = "Estimated Improvement to VO2 Max", y = "Aerobic Training Efficiency", x = "") +
+  theme_light()
+```
+
+```{r}
+# aerobic te trend one year
+te_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Aerobic.TE, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Aerobic Training Efficiency Over Time (Past Year)", subtitle = "Estimated Improvement to VO2 Max", y = "Aerobic Training Efficiency", x = "") +
+  theme_light()
+```
+
+```{r}
+te_graph1 / te_graph2
+```
+
+We can see in the Aerobic TE graphs that Collie’s runs are consistently more effective at improving his aerobics than Hound’s. This is likely due to his consistent improvement in pace. However in the short run Hound shows significant improvement in Aerobic TE, likely correlated with increased effort and exertion in his training.
+
+### Calories:
+
+```{r}
+# calories trend
+cal_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Calories, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Calories Burned per Run Over Time", y = "Calories", x = "") +
+  theme_light()
+```
+
+```{r}
+# calories trend one year
+cal_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Calories, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Calories Burned per Run Over Time (Past Year)", y = "Calories", x = "") +
+  theme_light()
+```
+
+```{r}
+cal_graph1 / cal_graph2
+```
+
+We can see in the calorie graphs that Collie and Hound exert roughly the same amount of energy in their run with Hound consistently burning marginally more calories than Collie likely due to increased exertion or other factors like height and weight.
+
+### Average Cadence:
+
+```{r}
+# candence trend
+cade_graph1 <- comp_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.Run.Cadence, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Average Run Cadence Over Time", y = "Average Cadence", x = "") +
+  theme_light()
+```
+
+```{r}
+# cadence trend one year
+cade_graph2 <- one_year_data %>% 
+  ggplot2::ggplot(ggplot2::aes(x = Date, y = Avg.Run.Cadence, color = Runner)) +
+  ggplot2::geom_point(alpha = 0.8) +
+  ggplot2::geom_smooth(method = "loess", se = FALSE) +
+  ggplot2::scale_color_manual("", values = c("#007c41","#ffdb05")) +
+  ggplot2::labs(title = "Average Run Cadence Over Time (Past Year)", y = "Average Cadence", x = "") +
+  theme_light()
+```
+
+```{r}
+cade_graph1 / cade_graph2
+```
+
+Run cadence is a major indicator of an effective running form and efficiency. Collie shows a higher cadence in both the short and long-run. This means that Collie takes shorter steps which can improve pace and reduce the impact of running. Hound's lower cadence could be an indicator of longer steps which could lead to increased risk of injury and may be indicative of overstriding.
+
+# Summary of Performance
+
+Overall Hound has been running for longer and more consistently than Collie, however, Collie has been keeping up and even outperforming Hound despite slight inconsistency in his running. With consistency, Hound’s numbers have remained consistent, not showing much improvement. Collie on the other hand has shown significant improvement despite some inconsistency with his running.
+
+```{r}
+# slopes data
+collie_data <- comp_data %>%
+  dplyr::filter(Runner == "Collie")
+
+hound_data <- comp_data %>%
+  dplyr::filter(Runner == "Hound")
+
+collie_data_1year <- comp_data %>%
+  dplyr::filter(Runner == "Collie", Date >= (year_ago-365))
+
+hound_data_1year <- comp_data %>%
+  dplyr::filter(Runner == "Hound", Date >= (year_ago-365))
+```
+
+<!--Pace Slopes-->
+
+```{r}
+# pace regression for collie
+fit_pace_collie <- stats::lm(Avg.Pace_real_min ~ Date, data = collie_data)
+```
+
+```{r}
+# pace regression for hound
+fit_pace_hound <- stats::lm(Avg.Pace_real_min ~ Date, data = hound_data)
+```
+
+```{r}
+# pace regression for collie one year
+fit_pace_collie_1year <- stats::lm(Avg.Pace_real_min ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# pace regression for hound one year
+fit_pace_hound_1year <- stats::lm(Avg.Pace_real_min ~ Date, data = hound_data_1year)
+```
+
+<!--HR Slopes-->
+
+```{r}
+# hr regression for collie
+fit_hr_collie <- stats::lm(Avg.HR ~ Date, data = collie_data)
+```
+
+```{r}
+# hr regression for hound
+fit_hr_hound <- stats::lm(Avg.HR ~ Date, data = hound_data)
+```
+
+```{r}
+# hr regression for collie one year
+fit_hr_collie_1year <- stats::lm(Avg.HR ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# hr regression for hound one year
+fit_hr_hound_1year <- stats::lm(Avg.HR ~ Date, data = hound_data_1year)
+```
+
+<!--Distance Slopes-->
+
+```{r}
+# distance regression for collie
+fit_distance_collie <- stats::lm(Distance ~ Date, data = collie_data)
+```
+
+```{r}
+# distance regression for hound
+fit_distance_hound <- stats::lm(Distance ~ Date, data = hound_data)
+```
+
+```{r}
+# distance regression for collie one year
+fit_distance_collie_1year <- stats::lm(Distance ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# distance regression for hound one year
+fit_distance_hound_1year <- stats::lm(Distance ~ Date, data = hound_data_1year)
+```
+
+<!--Aerobic TE Slopes-->
+
+```{r}
+# aerobic te regression for collie
+fit_te_collie <- stats::lm(Aerobic.TE ~ Date, data = collie_data)
+```
+
+```{r}
+# aerobic te regression for hound
+fit_te_hound <- stats::lm(Aerobic.TE ~ Date, data = hound_data)
+```
+
+```{r}
+# aerobic te regression for collie one year
+fit_te_collie_1year <- stats::lm(Aerobic.TE ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# aerobic te regression for hound one year
+fit_te_hound_1year <- stats::lm(Aerobic.TE ~ Date, data = hound_data_1year)
+```
+
+<!--Calorie Slopes-->
+
+```{r}
+# calorie regression for collie
+fit_cal_collie <- stats::lm(Calories ~ Date, data = collie_data)
+```
+
+```{r}
+# calorie regression for hound
+fit_cal_hound <- stats::lm(Calories ~ Date, data = hound_data)
+```
+
+```{r}
+# calorie regression for collie one year
+fit_cal_collie_1year <- stats::lm(Calories ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# calorie regression for hound one year
+fit_cal_hound_1year <- stats::lm(Calories ~ Date, data = hound_data_1year)
+```
+
+<!--Cadence Slopes-->
+
+```{r}
+# cadence regression for collie
+fit_cade_collie <- stats::lm(Avg.Run.Cadence ~ Date, data = collie_data)
+```
+
+```{r}
+# cadence regression for hound
+fit_cade_hound <- stats::lm(Avg.Run.Cadence ~ Date, data = hound_data)
+```
+
+```{r}
+# cadence regression for collie one year
+fit_cade_collie_1year <- stats::lm(Avg.Run.Cadence ~ Date, data = collie_data_1year)
+```
+
+```{r}
+# cadence regression for hound one year
+fit_cade_hound_1year <- stats::lm(Avg.Run.Cadence ~ Date, data = hound_data_1year)
+```
+
+```{r}
+# slopes table
+Runner <- c("Collie", "Hound", "Collie (Past Year)", "Hound (Past Year)")
+
+pace_slopes <- c(broom::tidy(fit_pace_collie)$estimate[2],
+                 broom::tidy(fit_pace_hound)$estimate[2],
+                 broom::tidy(fit_pace_collie_1year)$estimate[2],
+                 broom::tidy(fit_pace_hound_1year)$estimate[2]
+                 )
+
+hr_slopes <- c(broom::tidy(fit_hr_collie)$estimate[2], 
+               broom::tidy(fit_hr_hound)$estimate[2],
+               broom::tidy(fit_hr_collie_1year)$estimate[2],
+               broom::tidy(fit_hr_hound_1year)$estimate[2]
+               )
+
+distance_slopes <- c(broom::tidy(fit_distance_collie)$estimate[2],
+                     broom::tidy(fit_distance_hound)$estimate[2],
+                     broom::tidy(fit_distance_collie_1year)$estimate[2],
+                     broom::tidy(fit_distance_hound_1year)$estimate[2]
+                     )
+
+te_slopes <- c(broom::tidy(fit_te_collie)$estimate[2],
+               broom::tidy(fit_te_hound)$estimate[2],
+               broom::tidy(fit_te_collie_1year)$estimate[2],
+               broom::tidy(fit_te_hound_1year)$estimate[2]
+               )
+
+cal_slopes <- c(broom::tidy(fit_cal_collie)$estimate[2],
+                broom::tidy(fit_cal_hound)$estimate[2],
+                broom::tidy(fit_cal_collie_1year)$estimate[2],
+                broom::tidy(fit_cal_hound_1year)$estimate[2]
+                )
+
+cade_slopes <- c(broom::tidy(fit_cade_collie)$estimate[2],
+                 broom::tidy(fit_cade_hound)$estimate[2],
+                 broom::tidy(fit_cade_collie_1year)$estimate[2],
+                 broom::tidy(fit_cade_hound_1year)$estimate[2]
+                 )
+
+slopes_table <- dplyr::tibble(Runner, Average_Pace = pace_slopes, Average_HR = hr_slopes, Distance = distance_slopes, Aerobic_TE = te_slopes, Calories = cal_slopes, Average_Cadence = cade_slopes)
+
+slopes_table %>%
+  gt::gt() %>%
+  gt::tab_options(table.width = pct(100)) %>%
+  cols_label(
+    Runner = md("**Runner**"),
+    Average_Pace = md("**Average_Pace**"),
+    Average_HR = md("**Average_HR**"),
+    Distance = md("**Distance**"),
+    Aerobic_TE = md("**Aerobic_TE**"),
+    Calories = md("**Calories**"),
+    Average_Cadence = md("**Average_Cadence**")
+  )
+
+```
+
+This table contains the slopes of the regressions of each variable with time. We can use it to examine trends for each runner’s Average Pace, Average Heart Rate, Distance, Aerobic TE, Calories, and Average Cadence.
+
+What stands out:
+
+We can see that Collie and Hound both have improved in regards to Average Pace, with hound showing more improvement in the long-run (m = -0.0005022) and Collie showing more in the short-run (m = -0.003438).
+
+We can also see that in the long-run, Aerobic TE seems to decline for Collie (m = -0.00001617) and improve for Hound (m = 0.0006240), likely due to inconsistent training. Over the short-run however, Collie shows better improvement than Hound (Collie -\> m = 0.001801; Hound -\> m = 0.0002942).
+
+Lastly we can look at Average Cadence where Collie shows an improvement in both the long and short-run (long-run -\> m = 0.001107; short-run -\> m = 0.04924), while Hound shows a trend decrease in both the short and long-run (long-run -\> m = -0.004071; short-run -\> m = -0.01258)
+
+# Rationale behind the Models Performance
+
+We decided our model would be based off Average Pace, since that seed like the best measurement for who is the best runner. The independent variables we used were Average Run Cadence, Aerobic TE, Distance, Average HR, and Calories.
+
+## Univariate Screening
+
+```{r}
+fit_univariate <- comp_data %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-Runner, -Date, -Avg.Pace_real_min) %>%
+  purrr::map(~lm(comp_data$Avg.Pace_real_min ~ .x)) %>%
+  purrr::map(summary) %>%
+  purrr::map_dbl("r.squared") %>%
+  tibble::tibble(Predictors = names(.), r.squared = .) %>%
+  dplyr::arrange(desc(.[[2]]))
+
+fit_univariate %>%
+  gt::gt() %>%
+  gt::fmt_percent(columns = !matches("Predictors"), decimals = 1) %>%
+  gt::tab_options(table.width = pct(100)) %>%
+  cols_label(
+    Predictors = md("**Predictors**"),
+    r.squared = md("**r.squared**")
+    )
+  
+
+```
+
+Running a univariate screening revealed that Average Cadence has the highest impact on Average Pace, followed by Aerobic TE. The other variables revealed very little impact on Average Pace.
+
+## Recursive Models
+
+```{r}
+fit1 <- stats::lm(Avg.Pace_real_min ~ Avg.Run.Cadence, comp_data)
+fit2 <- stats::lm(Avg.Pace_real_min ~ Avg.Run.Cadence + Aerobic.TE, comp_data)
+fit3 <- stats::lm(Avg.Pace_real_min ~ Avg.Run.Cadence + Aerobic.TE + Distance, comp_data)
+fit4 <- stats::lm(Avg.Pace_real_min ~ Avg.Run.Cadence + Aerobic.TE + Distance + Avg.HR, comp_data)
+fit5 <- stats::lm(Avg.Pace_real_min ~ Avg.Run.Cadence + Aerobic.TE + Distance + Avg.HR + Calories, comp_data)
+
+fit1 %>% broom::glance() %>%
+  dplyr::add_row(fit2 %>% broom::glance()) %>%
+  dplyr::add_row(fit3 %>% broom::glance()) %>%
+  dplyr::add_row(fit4 %>% broom::glance()) %>%
+  dplyr::add_row(fit5 %>% broom::glance()) %>%
+  dplyr::select(r.squared, adj.r.squared, statistic, p.value) %>%
+  dplyr::mutate(model = paste0("Model ", dplyr::row_number())) %>%
+  dplyr::select(model, everything()) %>%
+  gt::gt() %>%
+  gt::fmt_percent(columns = !matches("statistic|model"), decimals = 1) %>%
+  gt::fmt_number(columns = matches("statistic"), decimals = 1) %>%
+  gt::fmt_percent(columns = matches("p.value"), decimals = 3) %>%
+  gt::tab_options(table.width = pct(100)) %>%
+  cols_label(
+    model = md("**model**"),
+    r.squared = md("**r.squared**"),
+    adj.r.squared = md("**adj.r.squared**"),
+    statistic = md("**statistic**"),
+    p.value = md("**p.value**")
+  )
+  
+```
+
+## Multicollinearity Diagnostics
+
+```{r}
+vif_mod2_tbl <- tibble::tibble(Variable = names(car::vif(fit2)), model_2_VIF = as.numeric(car::vif(fit2)))
+```
+
+```{r}
+vif_mod3_tbl <- tibble::tibble(Variable = names(car::vif(fit3)), model_3_VIF = as.numeric(car::vif(fit3)))
+```
+
+```{r}
+vif_mod4_tbl <- tibble::tibble(Variable = names(car::vif(fit4)), model_4_VIF = as.numeric(car::vif(fit4)))
+```
+
+```{r}
+vif_mod5_tbl <- tibble::tibble(Variable = names(car::vif(fit5)), model_5_VIF = as.numeric(car::vif(fit5)))
+```
+
+```{r}
+vif_model <- vif_mod2_tbl %>%
+  dplyr::full_join(vif_mod3_tbl, by = "Variable") %>%
+  dplyr::full_join(vif_mod4_tbl, by = "Variable") %>%
+  dplyr::full_join(vif_mod5_tbl, by = "Variable") %>%
+  gt::gt() %>%
+  gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
+  gt::tab_options(table.width = pct(100)) %>% 
+  cols_label(
+    Variable = md("**Variable**"),
+    model_2_VIF = md("**model_2_VIF**"),
+    model_3_VIF = md("**model_3_VIF**"),
+    model_4_VIF = md("**model_4_VIF**"),
+    model_5_VIF = md("**model_5_VIF**")
+  )
+
+vif_model
+```
+
+Out of all our models model 5 showed the highest adjusted R squared, however our Multicollinearity Diagnostics showed that Calories and Distance interact in a way that is likely unreliably inflating the Adjusted R Squared in our model. Due to that we decided model 4 was the most reliable.
+
+## Best Model
+
+```{r}
+fit4 %>% broom::tidy() %>%
+  gt::gt() %>%
+  gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
+  gt::tab_options(table.width = pct(100)) %>% 
+  cols_label(
+    term = md("**term**"),
+    estimate = md("**estimate**"),
+    std.error = md("**std.error**"),
+    statistic = md("**statistic**"),
+    p.value = md("**p.value**")
+  )
+```
+
+## Residual Diagnostics
+
+```{r}
+autoplot(fit4, size = 0.5)
+```
+Residual vs Fitted plot indicates that the model fits reasonably well, but it might benefit from a non-linear approach.
+
+Q-Q plot indicates that the model fits a normal distribution somewhat well with some diversion in the tails.
+
+Location-Scale plot indicates some heteroscedasticity.
+
+Residuals vs Leverage plot indicates that some points have higher influence on the regression.
+
+# Recommendation
+
+Based on the full scope of our analysis, we recommend coaching Collie to further develop their competitive potential. Across all indicators Aerobic Training Effect, pace efficiency, cadence, and heart rate response Collie demonstrates superior aerobic conditioning and measurable improvement over time.
+
+Collie consistently achieves higher Aerobic TE scores, reflecting more effective cardiovascular adaptation and training response. Their higher pace to heart rate ratio indicates greater running efficiency, sustaining faster speeds at lower exertion. Higher cadence indicates better running efficiency and a lower chance of injuries. While Hound shows higher overall calorie expenditure, this reflects training volume rather than fitness efficiency. Collie, in contrast, achieves comparable or greater aerobic benefits with lower energy cost, signaling stronger physiological efficiency.
+
+By focusing coaching efforts on Collie, we can build upon this momentum to enhance race level performance. A program emphasizing incremental distance development, cadence optimization, and controlled heart rate zones will strengthen Collie’s aerobic capacity, supporting continued improvement and long-term success.
+
+Therefore, Collie is the optimal candidate for coaching advancement.
